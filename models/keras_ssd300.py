@@ -31,7 +31,7 @@ from keras_layers.keras_layer_DecodeDetectionsFast import DecodeDetectionsFast
 def ssd_300(image_size,
             n_classes,
             mode='training',
-            l2_regularization=0.0005,
+            l2_reg=0.0005,
             min_scale=None,
             max_scale=None,
             scales=None,
@@ -267,40 +267,78 @@ def ssd_300(image_size,
         https://arxiv.org/abs/1512.02325v5
     '''
 
-    n_predictor_layers = 6 # The number of predictor conv layers in the network is 6 for the original SSD300.
-    n_classes += 1 # Account for the background class.
-    l2_reg = l2_regularization # Make the internal name shorter.
-    img_height, img_width, img_channels = image_size[0], image_size[1], image_size[2]
+    img_height, img_width, img_channels = image_size
+    # The number of predictor convolutional layers in the network is 6 for the
+    # original SSD300.
+    n_predictor_layers = 6
+    # Account for the background class.
+    n_classes += 1
 
     ############################################################################
     # Get a few exceptions out of the way.
     ############################################################################
 
-    if aspect_ratios_global is None and aspect_ratios_per_layer is None:
-        raise ValueError("`aspect_ratios_global` and `aspect_ratios_per_layer` cannot both be None. At least one needs to be specified.")
-    if aspect_ratios_per_layer:
-        if len(aspect_ratios_per_layer) != n_predictor_layers:
-            raise ValueError("It must be either aspect_ratios_per_layer is None or len(aspect_ratios_per_layer) == {}, but len(aspect_ratios_per_layer) == {}.".format(n_predictor_layers, len(aspect_ratios_per_layer)))
+    if aspect_ratios_per_layer is None:
+        if aspect_ratios_global is None:
+            raise ValueError(
+                ('Either `aspect_ratios_global` or `aspect_ratios_per_layer` '
+                 'must be specified. Received None for both.')
+            )
+    elif len(aspect_ratios_per_layer) != n_predictor_layers:
+        raise ValueError(
+            ('Length of `aspect_ratios_per_layer` ({}) does not match number '
+             'of prediction layers ({}).').format(
+                len(aspect_ratios_per_layer), n_predictor_layers)
+        )
 
-    if (min_scale is None or max_scale is None) and scales is None:
-        raise ValueError("Either `min_scale` and `max_scale` or `scales` need to be specified.")
-    if scales:
-        if len(scales) != n_predictor_layers+1:
-            raise ValueError("It must be either scales is None or len(scales) == {}, but len(scales) == {}.".format(n_predictor_layers+1, len(scales)))
-    else: # If no explicit list of scaling factors was passed, compute the list of scaling factors from `min_scale` and `max_scale`
-        scales = np.linspace(min_scale, max_scale, n_predictor_layers+1)
+    if scales is None:
+        if min_scale is None and max_scale is None:
+            raise ValueError(
+                ('No values specified for scales (`scales`, `min_scale`, '
+                 '`max_scale`).')
+            )
+        elif ((min_scale is None and max_scale is not None)
+                or (min_scale is not None and max_scale is None)):
+            raise ValueError('`min_scale` AND `max_scale` must be specified.')
+        else:
+            # Compute the list of scaling factors from the specified `min_scale`
+            # and `max_scale`
+            scales = np.linspace(min_scale, max_scale, n_predictor_layers+1)
+    elif len(scales) != n_predictor_layers+1:
+        raise ValueError(
+            ('Length of `scales` ({}) does not match number of prediction '
+             ' layers + 1 ({}).').format(len(scales), n_predictor_layers+1)
+        )
 
     if len(variances) != 4:
-        raise ValueError("4 variance values must be pased, but {} values were received.".format(len(variances)))
+        raise ValueError(
+            ('Four (4) variance values must be provided, but {} were '
+             'received.').format(len(variances))
+        )
     variances = np.array(variances)
     if np.any(variances <= 0):
-        raise ValueError("All variances must be >0, but the variances given are {}".format(variances))
+        raise ValueError(
+            ('Found negative variances in provided list ({}). All variances '
+             'must be positive (>0)').format(variances)
+        )
 
-    if (not (steps is None)) and (len(steps) != n_predictor_layers):
-        raise ValueError("You must provide at least one step value per predictor layer.")
+    if steps is not None and len(steps) != n_predictor_layers:
+        raise ValueError(
+            ('Length of `steps` ({}) does not match the number of prediction '
+             'layers ({}).').format(len(steps), n_predictor_layers)
+        )
 
-    if (not (offsets is None)) and (len(offsets) != n_predictor_layers):
-        raise ValueError("You must provide at least one offset value per predictor layer.")
+    if offsets is not None and len(offsets) != n_predictor_layers:
+        raise ValueError(
+            ('Length of `offsets` ({}) does not match the number of prediction '
+             'layers ({}).').format(len(offsets), n_predictor_layers)
+        )
+
+    if mode not in ('training', 'inference', 'inference_fast'):
+        raise ValueError(
+            ('`mode` must be one of "training", "inference" or '
+             '"inference_fast", but received "{}".').format(mode)
+        )
 
     ############################################################################
     # Compute the anchor box parameters.
@@ -538,8 +576,6 @@ def ssd_300(image_size,
                                                    img_width=img_width,
                                                    name='decoded_predictions')(predictions)
         model = Model(inputs=x, outputs=decoded_predictions)
-    else:
-        raise ValueError("`mode` must be one of 'training', 'inference' or 'inference_fast', but received '{}'.".format(mode))
 
     if return_predictor_sizes:
         predictor_sizes = np.array([conv4_3_norm_mbox_conf._keras_shape[1:3],
