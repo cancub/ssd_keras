@@ -344,27 +344,19 @@ def ssd_300(image_size,
     # Compute the anchor box parameters.
     ############################################################################
 
-    # Set the aspect ratios for each predictor layer. These are only needed for the anchor box layers.
+    # Set the aspect ratios for each predictor layer. These are only needed for
+    # the anchor box layers.
     if aspect_ratios_per_layer:
         aspect_ratios = aspect_ratios_per_layer
     else:
         aspect_ratios = [aspect_ratios_global] * n_predictor_layers
 
-    # Compute the number of boxes to be predicted per cell for each predictor layer.
-    # We need this so that we know how many channels the predictor layers need to have.
-    if aspect_ratios_per_layer:
-        n_boxes = []
-        for ar in aspect_ratios_per_layer:
-            if (1 in ar) & two_boxes_for_ar1:
-                n_boxes.append(len(ar) + 1) # +1 for the second box for aspect ratio 1
-            else:
-                n_boxes.append(len(ar))
-    else: # If only a global aspect ratio list was passed, then the number of boxes is the same for each predictor layer
-        if (1 in aspect_ratios_global) & two_boxes_for_ar1:
-            n_boxes = len(aspect_ratios_global) + 1
-        else:
-            n_boxes = len(aspect_ratios_global)
-        n_boxes = [n_boxes] * n_predictor_layers
+    # Compute the number of boxes to be predicted per cell for each predictor
+    # layer. We need this so that we know how many channels the predictor layers
+    # need to have.
+    # NOTE: +1 for the second box for aspect ratio 1
+    n_boxes = [len(ar) + (1 if two_boxes_for_ar1 and 1 in ar else 0)
+               for ar in aspect_ratios]
 
     if steps is None:
         steps = [None] * n_predictor_layers
