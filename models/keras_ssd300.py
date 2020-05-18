@@ -49,9 +49,6 @@ def ssd_300(image_size,
             variances=[0.1, 0.1, 0.2, 0.2],
             coords='centroids',
             normalize_coords=True,
-            subtract_mean=[123, 117, 104],
-            divide_by_stddev=None,
-            swap_channels=[2, 1, 0],
             confidence_thresh=0.01,
             iou_threshold=0.45,
             top_k=200,
@@ -197,25 +194,6 @@ def ssd_300(image_size,
             Set to `True` if the model is supposed to use relative instead of
             absolute coordinates, i.e., if the model predicts box coordinates
             within [0,1] instead of absolute coordinates.
-
-        subtract_mean (array-like):
-            `None` or an array-like object of integers or floating point values
-            of any shape that is broadcast-compatible with the image shape. The
-            elements of this array will be subtracted from the image pixel
-            intensity values. For example, pass a list of three integers to
-            perform per-channel mean normalization for color images.
-
-        divide_by_stddev (array-like):
-            `None` or an array-like object of non-zero integers or floating
-            point values of any shape that is broadcast-compatible with the
-            image shape. The image pixel intensity values will be divided by the
-            elements of this array. For example, pass a list of three integers
-            to perform per-channel standard deviation normalization for color
-            images.
-
-        swap_channels (list):
-            Either `False` or a list of integers representing the desired order
-            in which the input image channels should be swapped.
 
         confidence_thresh (float):
             A float in [0,1), the minimum classification confidence in a
@@ -364,40 +342,14 @@ def ssd_300(image_size,
         offsets = [None] * n_predictor_layers
 
     ############################################################################
-    # Define functions for the Lambda layers below.
-    ############################################################################
-
-    def identity_layer(tensor):
-        return tensor
-
-    def input_mean_normalization(tensor):
-        return tensor - np.array(subtract_mean)
-
-    def input_stddev_normalization(tensor):
-        return tensor / np.array(divide_by_stddev)
-
-    def input_channel_swap(tensor):
-        if len(swap_channels) == 3:
-            return K.stack([tensor[...,swap_channels[0]], tensor[...,swap_channels[1]], tensor[...,swap_channels[2]]], axis=-1)
-        elif len(swap_channels) == 4:
-            return K.stack([tensor[...,swap_channels[0]], tensor[...,swap_channels[1]], tensor[...,swap_channels[2]], tensor[...,swap_channels[3]]], axis=-1)
-
-    ############################################################################
     # Build the network.
     ############################################################################
 
     x = Input(shape=(img_height, img_width, img_channels))
 
-    # The following identity layer is only needed so that the subsequent lambda layers can be optional.
-    x1 = Lambda(identity_layer, output_shape=(img_height, img_width, img_channels), name='identity_layer')(x)
-    if not (subtract_mean is None):
-        x1 = Lambda(input_mean_normalization, output_shape=(img_height, img_width, img_channels), name='input_mean_normalization')(x1)
-    if not (divide_by_stddev is None):
-        x1 = Lambda(input_stddev_normalization, output_shape=(img_height, img_width, img_channels), name='input_stddev_normalization')(x1)
-    if swap_channels:
-        x1 = Lambda(input_channel_swap, output_shape=(img_height, img_width, img_channels), name='input_channel_swap')(x1)
 
-    conv1_1 = Conv2D(64, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal', kernel_regularizer=l2(l2_reg), name='conv1_1')(x1)
+
+    conv1_1 = Conv2D(64, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal', kernel_regularizer=l2(l2_reg), name='conv1_1')(x)
     conv1_2 = Conv2D(64, (3, 3), activation='relu', padding='same', kernel_initializer='he_normal', kernel_regularizer=l2(l2_reg), name='conv1_2')(conv1_1)
     pool1 = MaxPooling2D(pool_size=(2, 2), strides=(2, 2), padding='same', name='pool1')(conv1_2)
 
