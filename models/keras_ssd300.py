@@ -15,12 +15,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 '''
+import tensorflow as tf
 
 from __future__ import division
+from tensorflow.keras import Input, Model
+from tensorflow.keras.layers import (Concatenate, Conv2D, Dropout, Flatten,
+    Lambda, MaxPooling2D, Reshape, Softmax, ZeroPadding2D)
+from tensorflow.keras.regularizers import l2
 import numpy as np
-from keras.models import Model
-from keras.layers import Input, Lambda, Activation, Conv2D, MaxPooling2D, ZeroPadding2D, Reshape, Concatenate
-from keras.regularizers import l2
 import keras.backend as K
 
 from keras_layers.keras_layer_AnchorBoxes import AnchorBoxes
@@ -69,8 +71,7 @@ def ssd_300(image_size,
     Some of these arguments are explained in more detail in the documentation of
     the `SSDBoxEncoder` class.
 
-    Note: Requires Keras v2.0 or later. Currently works only with the
-    TensorFlow backend (v1.0 or later).
+    NOTE: Requires TensorFlow 2 or later.
 
     Required Arguments:
 
@@ -490,7 +491,7 @@ def ssd_300(image_size,
 
     # The box coordinate predictions will go into the loss function just the way they are,
     # but for the class predictions, we'll apply a softmax activation layer first
-    mbox_conf_softmax = Activation('softmax', name='mbox_conf_softmax')(mbox_conf)
+    mbox_conf_softmax = Softmax(mbox_conf)
 
     # Concatenate the class and box predictions and the anchors to one large predictions vector
     # Output shape of `predictions`: (batch, n_boxes_total, n_classes + 4 + 8)
