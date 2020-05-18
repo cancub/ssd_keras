@@ -17,45 +17,42 @@ limitations under the License.
 '''
 import tensorflow as tf
 
-from __future__ import division
 from tensorflow.keras import Input, Model
-from tensorflow.keras.layers import (Concatenate, Conv2D, Dropout, Flatten,
-    Lambda, MaxPooling2D, Reshape, Softmax, ZeroPadding2D)
+from tensorflow.keras.layers import (Concatenate, Conv2D, LayerNormalization,
+    MaxPooling2D, Reshape, Softmax, ZeroPadding2D)
 from tensorflow.keras.regularizers import l2
 import numpy as np
 
 from keras_layers.keras_layer_AnchorBoxes import AnchorBoxes
-from keras_layers.keras_layer_L2Normalization import L2Normalization
 from keras_layers.keras_layer_DecodeDetections import DecodeDetections
 from keras_layers.keras_layer_DecodeDetectionsFast import DecodeDetectionsFast
 
-
-def ssd_300(image_shape,
-            n_classes,
-            mode='training',
-            l2_reg=0.0005,
-            min_scale=None,
-            max_scale=None,
-            scales=None,
-            aspect_ratios_global=None,
-            aspect_ratios_per_layer=[[1.0, 2.0, 0.5],
-                                     [1.0, 2.0, 0.5, 3.0, 1.0/3.0],
-                                     [1.0, 2.0, 0.5, 3.0, 1.0/3.0],
-                                     [1.0, 2.0, 0.5, 3.0, 1.0/3.0],
-                                     [1.0, 2.0, 0.5],
-                                     [1.0, 2.0, 0.5]],
-            two_boxes_for_ar1=True,
-            steps=[8, 16, 32, 64, 100, 300],
-            offsets=None,
-            clip_boxes=False,
-            variances=[0.1, 0.1, 0.2, 0.2],
-            coords='centroids',
-            normalize_coords=True,
-            confidence_thresh=0.01,
-            iou_threshold=0.45,
-            top_k=200,
-            nms_max_output_size=400,
-            return_predictor_sizes=False):
+def ssd(image_shape,
+        n_classes,
+        mode='training',
+        l2_reg=0.0005,
+        min_scale=None,
+        max_scale=None,
+        scales=None,
+        aspect_ratios_global=None,
+        aspect_ratios_per_layer=[[1.0, 2.0, 0.5],
+                                    [1.0, 2.0, 0.5, 3.0, 1.0/3.0],
+                                    [1.0, 2.0, 0.5, 3.0, 1.0/3.0],
+                                    [1.0, 2.0, 0.5, 3.0, 1.0/3.0],
+                                    [1.0, 2.0, 0.5],
+                                    [1.0, 2.0, 0.5]],
+        two_boxes_for_ar1=True,
+        steps=[8, 16, 32, 64, 100, 300],
+        offsets=None,
+        clip_boxes=False,
+        variances=[0.1, 0.1, 0.2, 0.2],
+        coords='centroids',
+        normalize_coords=True,
+        confidence_thresh=0.01,
+        iou_threshold=0.45,
+        top_k=200,
+        nms_max_output_size=400,
+        return_predictor_sizes=False):
     '''
     Build a Keras model with SSD300 architecture, see references.
 
@@ -246,7 +243,7 @@ def ssd_300(image_shape,
         https://arxiv.org/abs/1512.02325v5
     '''
 
-    img_height, img_width, img_channels = image_shape
+    img_height, img_width, _ = image_shape
     # The number of predictor convolutional layers in the network is 6 for the
     # original SSD300.
     n_predictor_layers = 6
@@ -346,9 +343,28 @@ def ssd_300(image_shape,
     # Build the network.
     ############################################################################
 
-    def build_Conv(filters, size=3, strides=(1, 1), padding='same',
-                   d_rate=(1, 1), activation='relu', k_init='he_normal',
-                   k_reg=l2(l2_reg), input_layer=False):
+    # ======================= Collect the original VGG16 =======================
+
+    x = Input(shape=(300, 300, 3), name='input')
+
+    # Get the original VGG16, letting the model generation framework know about
+    # the input tensor
+    vgg16 = tf.keras.applications.VGG16(include_top=False, input_tensor=x)
+
+    net = [x]
+
+    # Strip out the layers we need (i.e., everything but input and maxpool5)
+    for layer in vgg16.layers[1:-1]:
+        net.append(layer(net[-1]))
+
+    # Use the size and stride values specified in the SSD paper for block5_pool
+    net.append(MaxPooling2D(3,1,'same', name='block5_pool')(net[-1]))
+
+    # ============================= Add SSD layers =============================
+
+    def build_Conv(layer_input, filters, size=3, strides=1, padding='same',
+                   d_rate=1, activation='relu', k_init='he_normal',
+                   k_reg=l2(l2_reg), name=None):
         return Conv2D(
             filters,
             size,
@@ -358,116 +374,128 @@ def ssd_300(image_shape,
             activation=activation,
             kernel_initializer=k_init,
             kernel_regularizer=k_reg,
-            input_shape=image_shape if input_layer else None
+            name=name,
+        )(layer_input)
+
+    # conv6
+    net.append(build_Conv(net[-1], 1024, d_rate=6, name='ssd_conv6'))
+
+    # conv7
+    net.append(build_Conv(net[-1], 1024, size=1, name='ssd_conv7'))
+
+    # Per-block tuples of (# of filters per layer, strides)
+    block_details = [(256,2,True), (128,2,True), (128,1,False), (128,1,False)]
+
+    # conv8_1 -> conv11_2
+    for i in range(len(block_details)):
+        # Get the details
+        block_num = i + 8
+        filters, strides, z_padding = block_details[i]
+        layer_template = 'ssd_conv{}_'.format(block_num) + '{}'
+
+        # Make the first layer
+        net.append(
+            build_Conv(net[-1], filters, size=1, name=layer_template.format(1))
+        )
+        if z_padding:
+            # NOTE: we need to explicitly call ZeroPadding2D here because we
+            #       want to _progressively_ move down in size to a 1x1 tensor
+            #       over 4 layers and neither 'same' nor 'valid' padding can
+            #       achieve this.
+            net.append(
+                ZeroPadding2D(name='ssd_zpad_{}'.format(block_num))(net[-1])
+            )
+
+        # Make the second layer
+        net.append(
+            build_Conv(
+                net[-1], 2 * filters, strides=strides, padding='valid',
+                name=layer_template.format(2)
+            )
         )
 
-    def build_MaxPool(pool_size=2, strides=None, padding='same'):
-        return MaxPooling2D(
-            pool_size=pool_size, strides=strides, padding=padding)
-
-    def build_AnchorBoxes(index):
+    # Build the convolutional predictor layers on top of the base network
+    def build_AnchorBoxes(layer_input, source_index):
         return AnchorBoxes(
             img_height, img_width,
-            this_scale=scales[index], next_scale=scales[index+1],
-            aspect_ratios=aspect_ratios[index],
+            this_scale=scales[source_index], next_scale=scales[source_index+1],
+            aspect_ratios=aspect_ratios[source_index],
             two_boxes_for_ar1=two_boxes_for_ar1,
-            this_steps=steps[index],
-            this_offsets=offsets[index],
+            this_steps=steps[source_index],
+            this_offsets=offsets[source_index],
             clip_boxes=clip_boxes,
             variances=variances,
             coords=coords,
             normalize_coords=normalize_coords,
-        )
+        )(layer_input)
 
-    detector_sources = OrderedDict()
-
-    x = Input(shape=(img_height, img_width, img_channels))
-
-    conv1_1 = build_Conv(64)(x)
-    conv1_2 = build_Conv(64)(conv1_1)
-    pool1 = build_MaxPool(conv1_2)
-
-    conv2_1 = build_Conv(128)(pool1)
-    conv2_2 = build_Conv(128)(conv2_1)
-    pool2 = build_MaxPool(conv2_2)
-
-    conv3_1 = build_Conv(256)(pool2)
-    conv3_2 = build_Conv(256)(conv3_1)
-    conv3_3 = build_Conv(256)(conv3_2)
-    pool3 = build_MaxPool(conv3_3)
-
-    conv4_1 = build_Conv(512)(pool3)
-    conv4_2 = build_Conv(512)(conv4_1)
-    conv4_3 = build_Conv(512)(conv4_2)
-    pool4 = build_MaxPool(conv4_3)
-    detector_sources['conv4_3'] = conv4_3
-
-    conv5_1 = build_Conv(512)(pool4)
-    conv5_2 = build_Conv(512)(conv5_1)
-    conv5_3 = build_Conv(512)(conv5_2)
-    pool5 = build_MaxPool(pool_size=(3, 3), strides=(1, 1))(conv5_3)
-
-    conv6 = build_Conv(1024, d_rate=(6, 6))(pool5)
-
-    conv7 = build_Conv(1024, size=1)(conv6)
-    detector_sources['conv7'] = conv7
-
-    conv8_1 = build_Conv(256, size=1)(conv7)
-    conv8_1 = ZeroPadding2D(padding=((1, 1), (1, 1)))(conv8_1)
-    conv8_2 = build_Conv(512, strides=(2, 2), padding='valid')(conv8_1)
-    detector_sources['conv8_2'] = conv8_2
-
-    conv9_1 = build_Conv(128, size=1)(conv8_2)
-    conv9_1 = ZeroPadding2D(padding=((1, 1), (1, 1)))(conv9_1)
-    conv9_2 = build_Conv(256, strides=(2, 2), padding='valid')(conv9_1)
-    detector_sources['conv9_2'] = conv9_2
-
-    conv10_1 = build_Conv(128, size=1)(conv9_2)
-    conv10_2 = build_Conv(256, strides=(1, 1), padding='valid')(conv10_1)
-    detector_sources['conv10_2'] = conv10_2
-
-    conv11_1 = build_Conv(128, size=1)(conv10_2)
-    conv11_2 = build_Conv(256, strides=(1, 1), padding='valid')(conv11_1)
-    detector_sources['conv11_2'] = conv11_2
-
-    # Feed conv4_3 into the L2 normalization layer
-    conv4_3_norm = L2Normalization(gamma_init=20)(conv4_3)
-    detector_sources['conv4_3_norm'] = conv4_3_norm
-
-    ### Build the convolutional predictor layers on top of the base network
-
-    conf_outputs = []
-    loc_outputs = []
+    prediction_sources = [
+        'block4_conv3', 'ssd_conv7', 'ssd_conv8_2', 'ssd_conv9_2',
+        'ssd_conv10_2', 'ssd_conv11_2'
+    ]
+    conf_outputs       = []
+    loc_outputs        = []
     priorboxes_outputs = []
+    if return_predictor_sizes:
+        predictor_sizes = []
 
-    i = 0
-    for name, layer in detector_sources.items():
+    for i, source in enumerate(prediction_sources):
+        boxes_in_layer = n_boxes[i]
+        layer          = next(l for l in net if l.get_info()['name'] == source)
+
+        if source == 'block4_conv3':
+            source = 'ssd_{}_norm'.format(source)
+            layer = LayerNormalization(name=source)(layer)
+
+        # Confidence
+        conf = build_Conv(
+            layer, boxes_in_layer * n_classes, name=source+'_conf')
+
+        if return_predictor_sizes:
+            predictor_sizes.append(conf._keras_shape[1:3])
+
+        # Reshape the class predictions, yielding 3D tensors of shape
+        #   `(batch, height * width * n_boxes, n_classes)`
+        # We want the classes isolated in the last axis to perform softmax on
+        # them
         conf_outputs.append(
-            Reshape((-1, n_classes))(
-                build_Conv(n_boxes[i] * n_classes)(layer)
-            )
+            Reshape((-1, n_classes), name=source+'_conf_reshape')(conf)
         )
 
-        loc = build_Conv(n_boxes[i] * 4)(layer)
+        # Locations
+        loc = build_Conv(layer, boxes_in_layer * 4, name=source+'_loc')
 
-        loc_outputs.append(Reshape((-1, 4))(loc))
+        # Reshape the box predictions, yielding 3D tensors of shape
+        #   `(batch, height * width * n_boxes, 4)`
+        # We want the four box coordinates isolated in the last axis to compute
+        # the smooth L1 loss
+        loc_outputs.append(Reshape((-1, 4), name=source+'_loc_reshape')(loc))
 
+        # Reshape the anchor box tensors, yielding 3D tensors of shape
+        #   `(batch, height * width * n_boxes, 8)
         priorboxes_outputs.append(
-            Reshape((-1, 8))(
-                build_AnchorBoxes(i)(loc)
-            )
+            Reshape((-1, 8), name=source+'_anchor_reshape')(
+                build_AnchorBoxes(loc, i))
         )
 
+    # Axis 0 (batch) and axis 2 (n_classes or 4, respectively) are identical for
+    # all layer predictions, so we want to concatenate along axis 1, the number
+    # of boxes per layer.
+    # Output shape of `mbox_conf`: (batch, n_boxes_total, n_classes)
     mbox_conf = Concatenate(axis=1)(conf_outputs)
+    # Output shape of `mbox_loc`: (batch, n_boxes_total, 4)
     mbox_loc = Concatenate(axis=1)(loc_outputs)
+    # Output shape of `mbox_priorbox`: (batch, n_boxes_total, 8)
     mbox_priorbox = Concatenate(axis=1)(priorboxes_outputs)
 
-    # The box coordinate predictions will go into the loss function just the way they are,
-    # but for the class predictions, we'll apply a softmax activation layer first
-    mbox_conf_softmax = Softmax(mbox_conf)
+    # The box coordinate predictions will go into the loss function just the way
+    # they are, but for the class predictions, we'll apply a softmax activation
+    # layer first
+    mbox_conf_softmax = Softmax()(mbox_conf)
 
-    # Concatenate the class and box predictions and the anchors to one large predictions vector
-    # Output shape of `predictions`: (batch, n_boxes_total, n_classes + 4 + 8)
+    # Concatenate the class and box predictions and the anchors to one large
+    # predictions vector. Output shape of `predictions`:
+    #   (batch, n_boxes_total, n_classes + 4 + 8)
     predictions = Concatenate(axis=2)(
         [mbox_conf_softmax, mbox_loc, mbox_priorbox])
 
@@ -490,13 +518,13 @@ def ssd_300(image_shape,
 
     model = Model(inputs=x, outputs=predictions)
 
+    # Make sure that we don't retrain the layers whose weights have already been
+    # optimized
+    for layer in model.layers:
+        if not layer.get_config()['name'].startswith('ssd'):
+            layer.trainable = False
+
     if return_predictor_sizes:
-        predictor_sizes = np.array([conv4_3_norm_mbox_conf._keras_shape[1:3],
-                                     fc7_mbox_conf._keras_shape[1:3],
-                                     conv6_2_mbox_conf._keras_shape[1:3],
-                                     conv7_2_mbox_conf._keras_shape[1:3],
-                                     conv8_2_mbox_conf._keras_shape[1:3],
-                                     conv9_2_mbox_conf._keras_shape[1:3]])
         return model, predictor_sizes
     else:
         return model
