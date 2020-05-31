@@ -23,7 +23,7 @@ from tensorflow.keras.layers import (Concatenate, Conv2D, LayerNormalization,
 from tensorflow.keras.regularizers import l2
 import numpy as np
 
-from keras_layers.keras_layer_AnchorBoxes import AnchorBoxes
+from ..priors import build_priors
 from keras_layers.keras_layer_DecodeDetections import DecodeDetections
 from keras_layers.keras_layer_DecodeDetectionsFast import DecodeDetectionsFast
 
@@ -415,19 +415,18 @@ def ssd(image_shape,
         )
 
     # Build the convolutional predictor layers on top of the base network
-    def build_AnchorBoxes(layer_input, source_index):
-        return AnchorBoxes(
-            img_height, img_width,
+    def build_anchor_boxes(layer_input, source_index):
+        return build_priors(
+            layer_input,
+            img_height,
             this_scale=scales[source_index], next_scale=scales[source_index+1],
             aspect_ratios=aspect_ratios[source_index],
             two_boxes_for_ar1=two_boxes_for_ar1,
-            this_steps=steps[source_index],
-            this_offsets=offsets[source_index],
             clip_boxes=clip_boxes,
             variances=variances,
             coords=coords,
             normalize_coords=normalize_coords,
-        )(layer_input)
+        )
 
     prediction_sources = [
         'block4_conv3', 'ssd_conv7', 'ssd_conv8_2', 'ssd_conv9_2',
@@ -474,8 +473,7 @@ def ssd(image_shape,
         # Reshape the anchor box tensors, yielding 3D tensors of shape
         #   `(batch, height * width * n_boxes, 8)
         priorboxes_outputs.append(
-            Reshape((-1, 8), name=source+'_anchor_reshape')(
-                build_AnchorBoxes(loc, i))
+            np.reshape(build_anchor_boxes(loc, i), (-1,8))
         )
 
     # Axis 0 (batch) and axis 2 (n_classes or 4, respectively) are identical for
@@ -486,7 +484,7 @@ def ssd(image_shape,
     # Output shape of `mbox_loc`: (batch, n_boxes_total, 4)
     mbox_loc = Concatenate(axis=1)(loc_outputs)
     # Output shape of `mbox_priorbox`: (batch, n_boxes_total, 8)
-    mbox_priorbox = Concatenate(axis=1)(priorboxes_outputs)
+    mbox_priorbox = np.concatenate(priorboxes_outputs, axis=0)
 
     # The box coordinate predictions will go into the loss function just the way
     # they are, but for the class predictions, we'll apply a softmax activation
@@ -496,8 +494,7 @@ def ssd(image_shape,
     # Concatenate the class and box predictions and the anchors to one large
     # predictions vector. Output shape of `predictions`:
     #   (batch, n_boxes_total, n_classes + 4 + 8)
-    predictions = Concatenate(axis=2)(
-        [mbox_conf_softmax, mbox_loc, mbox_priorbox])
+    predictions = Concatenate(axis=2)([mbox_conf_softmax, mbox_loc])
 
     if 'inference' in mode:
         if mode == 'inference':
@@ -525,6 +522,6 @@ def ssd(image_shape,
             layer.trainable = False
 
     if return_predictor_sizes:
-        return model, predictor_sizes
+        return model, mbox_priorbox, predictor_sizes
     else:
-        return model
+        return model, mbox_priorbox
